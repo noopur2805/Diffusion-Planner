@@ -1,4 +1,5 @@
-# Diffusion-Planner — Extension On Top Of Upstream
+# Diffusion-Planner
+## Extension On Top Of Upstream
 
 This fork extends the official **Diffusion-Planner** (ICLR 2025) with a
 **DreamerAD-style** RL fine-tuning stack and adds three extensions on top:
