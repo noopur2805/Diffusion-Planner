@@ -1,16 +1,27 @@
 # Diffusion-Planner — Extension On Top Of Upstream
 
 This fork extends the official **Diffusion-Planner** (ICLR 2025) with a
-**DreamerAD-style** RL stack and two original research contributions:
+**DreamerAD-style** RL fine-tuning stack and adds three extensions on top:
 
-1. **Vectorized Latent World Model** — per-horizon "imagined" scene tokens
-   that replace DreamerAD's pixel-based video-DiT rollout.
-2. **Uncertainty-Aware Dense Reward Model** — heteroscedastic head
-   predicting `(μ, log σ²)` per (horizon, metric) so GRPO can down-weight
-   advantages from uncertain rewards.
+1. **Vectorized (token-space) latent world model** — engineering port of
+   DreamerAD's pixel-space video-DiT into the planner's scene-token
+   space, ~485 K params, runs at the planner's native rate.
+2. **Heteroscedastic AD-RM head** — `(μ, log σ²)` per (horizon, metric)
+   via the Kendall–Gal (NIPS 2017) recipe, giving every reward a
+   calibrated confidence.
+3. **Uncertainty-weighted GRPO advantage** — `A ← A / (1 + τ · σ̄)`,
+   the smooth regularized form of inverse-variance weighting. This is
+   the cleanest algorithmic contribution and is testable in isolation
+   against vanilla GRPO via a `τ = 0` ablation.
 
-All upstream files (the DiT planner, SDE math, encoder/decoder, data
-loaders) are preserved. New code is additive and feature-flagged.
+All upstream files (DiT planner, SDE math, encoder/decoder, data
+loaders) are preserved. Every extension is gated by a flag and defaults
+to off, so the upstream behavior is recovered when nothing is enabled.
+
+> **Honest accounting.** The pipeline as a whole is a re-implementation
+> of DreamerAD on top of the upstream Diffusion-Planner. See
+> [§ Honest accounting](#honest-accounting) below for what is borrowed
+> from prior work versus what is genuinely original.
 
 ---
 
@@ -123,6 +134,155 @@ python scripts/visualize_uncertainty.py \
 * The CPU path is fully supported (`--device cpu`); was used to validate
   the end-to-end smoke run on an RTX 5060 (sm_120) machine where the
   installed PyTorch build does not yet support the GPU.
+
+---
+
+<a id="honest-accounting"></a>
+
+## Honest accounting — what is borrowed, what is mine
+
+The full pipeline is divided into three layers: borrowed from prior
+work, engineering work I did to wire it together, and genuinely new
+contributions.
+
+### Borrowed (faithful re-implementation)
+
+| Component | Origin |
+|---|---|
+| Shortcut Forcing self-distillation on a dyadic grid | Frans et al., NeurIPS 2024 |
+| AD-RM architecture (5 metrics × 8 horizons, BCE) | DreamerAD |
+| GRPO (clipped surrogate + group z-score advantage) | DeepSeekMath 2024, adopted by DreamerAD |
+| Trajectory vocabulary (filter + uniform sample, g1+g2 sampling, log-σ + log-sum aggregation) | DreamerAD |
+| BC anchor + KL-to-frozen-SFT-ref regularization | DreamerAD + standard PPO practice |
+| Concept of a learned world model feeding the reward critic | DreamerAD (theirs is pixel-space) |
+| Heteroscedastic Gaussian NLL `½(log σ² + e²/σ²)` | Kendall & Gal, NIPS 2017 |
+
+### Engineering work (not research contributions on their own)
+
+- Wiring all of the above into the upstream Diffusion-Planner codebase
+  without breaking its behavior when the new flags are disabled.
+- The proxy PDM labeler in `reward_labeling.py` — a practical
+  convenience so the AD-RM can be trained without the NavSim PDM
+  simulator. This is arguably a *limitation* of the prototype, not an
+  advance.
+- NavSim 8-camera fusion encoder, CPU-validated end-to-end smoke
+  pipeline, the 49-test suite, the uncertainty visualizer.
+
+### Original contributions
+
+#### A. Uncertainty-weighted GRPO advantage (strongest)
+
+```python
+# diffusion_planner/grpo.py — one line that changes the GRPO update
+advantages = group_advantage(rewards)
+if sigma is not None:
+    advantages = advantages / (1.0 + uncertainty_temp * cand_unc)
+```
+
+Where `cand_unc` is the mean of the AD-RM's predicted σ over
+(horizon, metric) per candidate.
+
+**Why this matters.** Vanilla GRPO's advantage is the group z-score of
+the predicted reward. When the reward model is noisy and
+heteroscedastic — confident on some candidates, unreliable on others —
+a single high-σ candidate with a spuriously inflated reward produces a
+large advantage and corrupts the policy gradient. PPO clipping does
+not fix this, because it bounds the importance ratio, not the
+advantage magnitude.
+
+The proposed update damps the advantage of each candidate by its
+predicted σ. The form `1 / (1 + τσ)` is sign-preserving (the policy
+still knows better/worse), bounded in `(0, 1]`, smooth everywhere, and
+reduces to vanilla GRPO at `τ = 0`. It is the smooth, regularized
+form of **inverse-variance weighting** — the classical BLUE estimator
+under Gaussian noise.
+
+**What it does:** addresses the well-known noisy-reward failure mode
+of vanilla GRPO. **What it does *not* do:** fix reward-model bias,
+reward hacking, or purely epistemic uncertainty (σ here is aleatoric).
+
+**Caveats.**
+- It is one line of code. The empirical effect must be demonstrated by
+  an ablation (`τ = 0` vs `τ > 0`, ≥ 3 seeds, mean ± std PDMS).
+- The exact functional form is one choice among several plausible ones
+  (`exp(−τσ)`, `1 / (τ + σ)`, etc.); picking it without sweeping is a
+  weakness.
+- This claim is contingent on DreamerAD not already doing a
+  σ-weighted advantage. The reader should verify this directly in the
+  paper before publishing.
+
+#### B. Heteroscedastic head on the AD-RM (conditional)
+
+The output head goes from 1 channel (BCE logit `μ`) to 2 channels
+(`μ`, `log σ²`). `μ` is BCE-supervised; `log σ²` is fit by the
+Kendall–Gal Gaussian NLL on the squared residual of `sigmoid(μ)`,
+giving a calibrated `(B, H, 5)` σ-map per trajectory.
+
+```
+L = BCE(μ, y)  +  w_unc · ½(log σ²  +  (sigmoid(μ).detach() − y)² / exp(log σ²))
+```
+
+The Kendall–Gal recipe is standard; the contribution is its
+**application** to the per-(horizon × metric) dense reward model in
+the context of driving RL. It is the prerequisite for contribution A
+— without σ, there is no advantage scaling — so the two stand or fall
+together.
+
+This claim is also contingent on DreamerAD's AD-RM not already
+emitting `(μ, log σ²)`; the reader should check the paper for
+"uncertainty", "aleatoric", "variance", "calibration".
+
+#### C. Vectorized (token-space) world model (engineering port)
+
+`LatentWorldModel` is a 2-layer cross-attention transformer
+(~485 K params) operating in the planner's scene-token space. It
+takes the planner's `(B, N, D)` scene tokens and a candidate
+trajectory, builds per-horizon `(action_emb + horizon_emb)`
+conditioning, and refines per-horizon copies of the scene by
+cross-attending back to the *original* scene tokens. Output:
+`(B, H, N, D)`. The AD-RM's 4-D context path then attends to these
+per-horizon imagined latents instead of a static present-time scene.
+
+The cross-attention-back-to-original-context is the inductive bias
+that keeps the predictor anchored — each horizon's tokens can evolve
+in time but must keep referencing the observed scene, so the predictor
+cannot hallucinate freely.
+
+**Honest framing.** The concept ("imagine futures with a learned world
+model and feed them to the reward critic") is DreamerAD's, not mine.
+The contribution is the realization in token space rather than pixel
+space, which makes the approach runnable at the planner's native
+inference rate. This is an engineering adaptation, not a research
+novelty. To upgrade it, an ablation must show per-horizon imagined
+latents beat a shared-token baseline.
+
+---
+
+## What this solves, and how
+
+| Problem | How it is addressed | Origin |
+|---|---|---|
+| Imitation-learning ceiling | Add GRPO RL fine-tuning on top of SFT | Integration of DreamerAD's recipe |
+| Multi-step diffusion is too slow for 20 Hz planning | Shortcut Forcing self-distillation → 1-step inference | Frans et al., integrated here |
+| Pixel-space world models are too heavy for vectorized planners | Vectorized token-space `LatentWorldModel` | Original engineering port (C) |
+| Noisy reward labels destabilize GRPO via spurious advantages | Heteroscedastic σ on the AD-RM (B) used to scale GRPO advantages (A) | Original contributions A + B |
+
+---
+
+## What it would take to upgrade these to publication-strength
+
+1. **Verify the DreamerAD paper** for any prior use of variance- or
+   σ-weighted advantage, or any `(μ, log σ²)` head on the AD-RM. If
+   either exists, the corresponding contribution must be withdrawn.
+2. **Run the four-variant ablation** on real PDMS:
+   - SFT only
+   - + GRPO (no extensions)
+   - + GRPO + uncertainty
+   - + GRPO + uncertainty + latent predictor
+   Across ≥ 3 seeds, report mean ± std.
+3. **Add a reliability diagram** for the AD-RM (bucket predictions by
+   σ, plot empirical accuracy per bucket) to verify calibration.
+4. **Sweep `τ`** over `{0, 0.5, 1, 2, 4}` and plot the PDMS-vs-τ curve.
 
 ---
 
