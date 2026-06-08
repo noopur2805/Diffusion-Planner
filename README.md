@@ -98,23 +98,6 @@ SFT (train_predictor.py) ─► AD-RM (train_reward.py) ─► GRPO (train_grpo.
 | `scripts/run_ablation.py` | Orchestrate the {baseline, +adaptive, +horizon-σ, +both, +cummax} ablation matrix across seeds. Dry-run by default; `--execute` to launch. |
 | `scripts/diagnose_horizon_error.py` | AD-RM mean `\|p − target\|` as a function of `(ego_speed, horizon)`; produces per-checkpoint heatmaps and an optional side-by-side fixed-vs-adaptive comparison. |
 
-### Tests
-
-`tests/` — 87 tests across 10 suites, all passing:
-
-| Suite | Tests |
-|---|---|
-| `test_shortcut_forcing` | 12 |
-| `test_dynamic_vocabulary` | 11 |
-| `test_grpo` | 10 |
-| `test_speed_adaptive_horizons` | 10 |
-| `test_trajectory_vocabulary` | 10 |
-| `test_latent_predictor` | 9 |
-| `test_metric_weights` | 7 |
-| `test_adaptive_horizon` | 6 |
-| `test_camera_encoder` | 6 |
-| `test_reward_model` | 6 |
-
 ---
 
 ## Reproducing the pipeline
