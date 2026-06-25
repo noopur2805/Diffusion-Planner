@@ -81,15 +81,15 @@ any closed-loop perturbation.
 The pipeline below turns that regression into **+72 %** by attacking
 the *reward labels*, not the algorithm.
 
-| Problem | Mechanism | Where |
-|---|---|---|
-| Open-loop labels reward edge-hugging trajectories that fail under execution noise | **Drift-augmented labeller** — perturb each candidate by `σ=0.5 m / 0.5 rad` cumulative drift before scoring; keep worst-case PDM. | `reward_labeling.py`, `--drift_aug_K --drift_aug_sigma` |
-| Reward labeller scored DAC against *any* lane (including oncoming) within 6 m → wrong-way turns got full credit | **Route-masked DAC + route-tangent DDC** — score only against the expert route, tighten threshold to 3 m. | `reward_labeling.py::label_trajectory_rewards(route_lanes=…)` |
-| A scalar reward collapses onto the easiest PDM metric (usually NC), policy ignores comfort / progress | **Dense AD-RM critic** (8 metrics × 8 horizons) + heteroscedastic `(μ, log σ²)` head; advantage divided by `1 + τσ̄`. | `model/reward_model.py`, `training/grpo.py` |
-| Pure-BCE reward training collapses onto stop-sign | **Per-metric pairwise margin** + **PDMS-weighted BCE** (`TTC=5, EP=5, comfort=2`). | `train_reward.py`, `--w_metric_margin --metric_loss_weights` |
-| GRPO ep2 mode-collapses onto a narrow trajectory mode | **Trajectory-dispersion entropy reg** (`−w_ent · Var(candidates)`) + tight `w_kl 0.02` anchor. | `training/grpo.py`, `--w_ent 0.05 --w_kl 0.02` |
-| Multi-step diffusion too slow for 20 Hz control | **Shortcut Forcing** distillation on a dyadic grid → 1-step inference. | `train_predictor.py`, `--use_shortcut` |
-| Temporal jitter between consecutive plans | **Ouroboros warm-start** + **Hausdorff TTM** re-rank of K parallel candidates. | `planner/planner.py` |
+| Problem | Mechanism | 
+|---|---|
+| Open-loop labels reward edge-hugging trajectories that fail under execution noise | **Drift-augmented labeller** — perturb each candidate by `σ=0.5 m / 0.5 rad` cumulative drift before scoring; keep worst-case PDM. | 
+| Reward labeller scored DAC against *any* lane (including oncoming) within 6 m → wrong-way turns got full credit | **Route-masked DAC + route-tangent DDC** — score only against the expert route, tighten threshold to 3 m. | 
+| A scalar reward collapses onto the easiest PDM metric (usually NC), policy ignores comfort / progress | **Dense AD-RM critic** (8 metrics × 8 horizons) + heteroscedastic `(μ, log σ²)` head; advantage divided by `1 + τσ̄`. |
+| Pure-BCE reward training collapses onto stop-sign | **Per-metric pairwise margin** + **PDMS-weighted BCE** (`TTC=5, EP=5, comfort=2`). | 
+| GRPO ep2 mode-collapses onto a narrow trajectory mode | **Trajectory-dispersion entropy reg** (`−w_ent · Var(candidates)`) + tight `w_kl 0.02` anchor. | 
+| Multi-step diffusion too slow for 20 Hz control | **Shortcut Forcing** distillation on a dyadic grid → 1-step inference. |
+| Temporal jitter between consecutive plans | **Ouroboros warm-start** + **Hausdorff TTM** re-rank of K parallel candidates. | 
 
 **Why it matters.** The route-masked label fix is architecture-agnostic
 and transfers to any imitation-trained planner whose proxy reward is
