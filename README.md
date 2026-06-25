@@ -1,8 +1,8 @@
 # Diffusion-Planner — Closed-loop RL fine-tune
 
 **RL fine-tuning of [Diffusion-Planner](https://github.com/ZhengYinan-AIR/Diffusion-Planner)
-(Zheng et al., [ICLR 2025 Oral, Notable-top-2 %](https://arxiv.org/abs/2501.15564))
-on an 8 GB laptop GPU.** This repo adds a closed-loop reward critic and
+(Zheng et al., [ICLR 2025 Oral, Notable-top-2 %](https://arxiv.org/abs/2501.15564)).** 
+This repo adds a closed-loop reward critic and
 GRPO loop on top of the upstream DiT — no architecture changes to the
 base model.
 
