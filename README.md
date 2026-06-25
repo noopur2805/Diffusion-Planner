@@ -1,0 +1,410 @@
+# Diffusion-Planner — Closed-loop RL fine-tune
+
+**RL fine-tuning of [Diffusion-Planner](https://github.com/ZhengYinan-AIR/Diffusion-Planner)
+(Zheng et al., [ICLR 2025 Oral, Notable-top-2 %](https://arxiv.org/abs/2501.15564))
+on an 8 GB laptop GPU.** This repo adds a closed-loop reward critic and
+GRPO loop on top of the upstream DiT — no architecture changes to the
+base model.
+
+The upstream model is a DiT-based motion planner that unifies prediction
+and planning as joint future-trajectory generation and samples at ~20 Hz.
+This repo asks: *can a closed-loop RL stack lift its closed-loop PDMS
+without touching the architecture?*
+
+**What this fork leverages:**
+- **Drift-augmented reward labelling** — perturb each candidate trajectory
+  by `σ=0.5 m / 0.5 rad` cumulative drift before scoring, so the reward
+  asks *"does this survive small execution errors?"* instead of *"does
+  this match the expert?"*
+- **Dense PDM-style reward critic** (8 sub-metrics × 8 horizons, with
+  heteroscedastic `(μ, log σ²)` heads) feeding **GRPO with σ-damped
+  advantage** and a trajectory-dispersion entropy regulariser.
+- **Route-masked reward labels** — score Drivable-Area Compliance only
+  against the expert-route corridor, not any nearby lane. Largest single
+  lever in the whole stack, zero model weights touched.
+
+**Headline:** closed-loop reactive PDMS **0.213 → 0.366 (+72 %)** on the
+47-scenario nuPlan-mini filter. *(nuPlan-mini is
+a tighter slice than upstream's Test14/Val14 splits — this is a
+fork-internal SFT-vs-GRPO ablation, not a leaderboard claim.)* Full
+narrative, ablations, ONNX/INT8 export, and per-novelty attribution live
+in [`docs/architecture.md`](docs/architecture.md).
+
+## Table of contents
+
+- [Results — per-scenario PDMS](#how-the-pdms-jump-was-earned--0213--0366-in-three-steps)
+- [What's new in this fork](#whats-new-in-this-fork)
+- [Architecture flow](#architecture-flow)
+- [Reproduce the full pipeline](#reproduce-the-full-pipeline)
+- [Visual A/B — SFT vs GRPO](#stage-6c--visual-ab-sft-vs-grpo-on-the-hard-turns)
+- [Ablations & attribution](docs/architecture.md#attribution--borrowed-components-and-original-contributions) *(in `docs/architecture.md`)*
+- [Citation](#citation)
+
+![Per-scenario-type PDMS — SFT 0.213 → GRPO 0.366 (n=47 reactive)](assets/img/pdms_breakdown.png)
+
+*Per-scenario-type closed-loop PDMS on the 47-scenario nuPlan-mini
+reactive filter; aggregate **0.213 → 0.366 (+72 %)**. Biggest wins:
+`stopping_at_stop_sign_with_lead` (0.000 → 1.000),
+`changing_lane_to_left` (0.000 → 0.434),
+`near_multiple_vehicles` (0.320 → 0.452). One regression:
+`starting_unprotected_cross_turn` (0.153 → 0.000) — the 3 m route
+corridor is too tight for turns that legally cross the centreline.
+Reproduce with `python scripts/plot_pdms_breakdown.py`.*
+
+### How the PDMS jump was earned — `0.213 → 0.366` in three steps
+
+| Stage | Lever | PDMS | Δ |
+|---|---|---:|---:|
+| **SFT baseline** | Imitation-only DiT — knows the average trajectory, drifts the moment it executes its own plan. | 0.213 | — |
+| **GRPO-CL `v6_r3`** | Dense AD-RM critic (8 metrics × 8 horizons) + drift-augmented reward labels (perturb each candidate by `σ=0.5 m` before scoring) + GRPO with σ-damped advantage. First closed-loop-aware reward signal. | 0.244 | **+0.031** |
+| **`v7_ent` recovery** | Three coupled fixes on the ep2 collapse: PDMS-weighted reward BCE (`TTC=5, EP=5, comfort=2`), trajectory-dispersion entropy reg (`w_ent 0.05`), policy-mode CRC recalibration. | 0.305 | **+0.061** |
+| **`v8 fix3c` route-aware reward** \*\* | Two label-time fixes in `reward_labeling.py`: route-masked DAC (score against expert route only, 6 → 3 m) + route-tangent DDC. One GRPO epoch from v7_ent peak with `w_kl 0.02`. **Largest single jump, zero model weights touched.** | **0.366** | **+0.061** |
+
+\*\* *Labels-only change; model weights are frozen on the v7_ent ep3
+checkpoint and only one extra GRPO epoch is run on the new reward.*
+
+The biggest gain came from a label change, not an architecture change.
+Mechanism breakdown and the side-by-side video A/B are in §Stage 6b.
+
+---
+
+## What's new in this fork
+
+SFT-trained planners learn the *average* trajectory beautifully — and
+drift the moment they execute their own (imperfect) plan. They have
+no reward signal, no notion of "barely collided", and no exposure to
+states the expert never visited. A naive GRPO fix on this stack
+**regressed PDMS by −33 %**: the policy learned to hug lane edges
+because that maximised the open-loop reward, then fell apart under
+any closed-loop perturbation.
+
+The pipeline below turns that regression into **+72 %** by attacking
+the *reward labels*, not the algorithm.
+
+| Problem | Mechanism | Where |
+|---|---|---|
+| Open-loop labels reward edge-hugging trajectories that fail under execution noise | **Drift-augmented labeller** — perturb each candidate by `σ=0.5 m / 0.5 rad` cumulative drift before scoring; keep worst-case PDM. | `reward_labeling.py`, `--drift_aug_K --drift_aug_sigma` |
+| Reward labeller scored DAC against *any* lane (including oncoming) within 6 m → wrong-way turns got full credit | **Route-masked DAC + route-tangent DDC** — score only against the expert route, tighten threshold to 3 m. | `reward_labeling.py::label_trajectory_rewards(route_lanes=…)` |
+| A scalar reward collapses onto the easiest PDM metric (usually NC), policy ignores comfort / progress | **Dense AD-RM critic** (8 metrics × 8 horizons) + heteroscedastic `(μ, log σ²)` head; advantage divided by `1 + τσ̄`. | `model/reward_model.py`, `training/grpo.py` |
+| Pure-BCE reward training collapses onto stop-sign | **Per-metric pairwise margin** + **PDMS-weighted BCE** (`TTC=5, EP=5, comfort=2`). | `train_reward.py`, `--w_metric_margin --metric_loss_weights` |
+| GRPO ep2 mode-collapses onto a narrow trajectory mode | **Trajectory-dispersion entropy reg** (`−w_ent · Var(candidates)`) + tight `w_kl 0.02` anchor. | `training/grpo.py`, `--w_ent 0.05 --w_kl 0.02` |
+| Multi-step diffusion too slow for 20 Hz control | **Shortcut Forcing** distillation on a dyadic grid → 1-step inference. | `train_predictor.py`, `--use_shortcut` |
+| Temporal jitter between consecutive plans | **Ouroboros warm-start** + **Hausdorff TTM** re-rank of K parallel candidates. | `planner/planner.py` |
+
+**Why it matters.** The route-masked label fix is architecture-agnostic
+and transfers to any imitation-trained planner whose proxy reward is
+dominated by open-loop geometry. Every stage runs on 8 GB VRAM — no
+A100s, no cluster.
+
+---
+
+## Architecture flow
+
+```
+                          ┌─────────────────────────────────────┐
+inputs (lanes + TL,       │ Encoder (frozen, upstream)          │
+agents, route,            │   → scene tokens z_t (B, N, D)      │
+optional 8 cameras)       └──────────────┬──────────────────────┘
+                                         │
+                ┌────────────────────────┴─────────────────────┐
+                ▼                                              ▼
+   DiT decoder (denoise, 1-step Shortcut)        candidate trajectory
+   + t_embedder (diffusion step)                 (from DynamicVocabulary)
+   + d_embedder (Shortcut step)                          │
+                │                                        │
+                ▼                                        ▼
+        policy_mean (B, T, 4) ───► group of G candidates (B, G, T, 4)
+                                          │
+                                          ▼
+                              LatentWorldModel(z_t, cand)
+                                 → (B, H, N, D)   [training only]
+                                          │
+                                          ▼
+                              AD-RM cross-attn queries
+                                 → (μ, log σ²) over 8 metrics × 8 horizons
+                                          │
+                                          ▼
+                              MetricWeightHead(z_t) → w ∈ ℝ^8
+                                          │
+                                          ▼
+                              total_reward_from_dense
+                                 (safety gate × task sum, σ-damped)
+                                          │
+                                          ▼
+                              drift-aug proxy PDM ───►  GRPO loss
+                                 (closed-loop labels)    actor + BC + KL
+                                                              │
+                                                              ▼
+                                                  backprop → DiT only
+```
+
+**At inference**: only the DiT decoder runs; K parallel candidates are
+sampled in one Shortcut step, the previous plan warm-starts `x_T`
+(Ouroboros), and Hausdorff distance to that plan picks the winner
+(MomAD TTM). The reward model and world model are training-time only.
+
+---
+
+## Reproduce the full pipeline
+
+### Environment
+
+```bash
+conda activate diffusion_planner
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TRAIN_SET=cache/mini_train
+export TRAIN_LIST=configs/splits/diffusion_planner_training.json
+export RUN_ROOT=runs
+```
+
+### Stage 1 — SFT (Shortcut Forcing)
+
+```bash
+python train_predictor.py \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --use_shortcut True --shortcut_k_max 16 --shortcut_steps 1 \
+    --batch_size 16 --num_workers 2 --device cuda \
+    --train_epochs 500 --early_stop_patience 10 --early_stop_min_delta 1e-4 \
+    --save_dir $RUN_ROOT/sft
+
+BEST_CKPT=$(ls -1 $RUN_ROOT/sft/training_log/diffusion-planner-training/*/best.pth | head -1)
+```
+
+### Stage 2 — Reward model (BCE + per-metric margin)
+
+```bash
+python train_reward.py \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --planner_ckpt "$BEST_CKPT" \
+    --save_dir $RUN_ROOT/reward8_v2 \
+    --device cuda --batch_size 8 --num_workers 2 --n_candidates 8 \
+    --epochs 12 --early_stop_patience 5 --early_stop_min_delta 1e-4 \
+    --use_shortcut \
+    --use_latent_predictor --latent_layers 2 \
+    --predict_uncertainty --w_uncertainty 0.1 \
+    --use_metric_weights --w_metric_margin 0.5 \
+    --adaptive_horizons --dt 0.1
+```
+
+### Stage 3 — Trajectory vocabulary
+
+```bash
+python build_vocabulary.py \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --out_path $RUN_ROOT/vocabulary.pt --max_size 8192
+```
+
+### Stage 4 — GRPO fine-tune (`GRPO-CL`, the headline recipe)
+
+```bash
+python -u train_grpo.py \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --planner_ckpt "$BEST_CKPT" \
+    --reward_ckpt  "$RUN_ROOT/reward8_v2/reward_best.pth" \
+    --vocab_path   $RUN_ROOT/vocabulary.pt \
+    --save_dir     $RUN_ROOT/grpo_cl8_v6_r3 \
+    --device cuda --batch_size 16 --num_workers 2 --epochs 3 \
+    --w_bc 1.0 --w_kl 0.1 --use_shortcut \
+    --uncertainty_temp 1.0 --horizon_uncertainty_temp 1.0 --cumulative_uncertainty \
+    --use_metric_weights --use_dynamic_vocab \
+    --drift_aug_K 4 --drift_aug_sigma 0.5
+# Deploy: $RUN_ROOT/grpo_cl8_v6_r3/grpo_epoch_1.pth   (PDMS peaks at ep1)
+```
+
+### Stage 5 — Closed-loop nuPlan simulation (47-scn reactive)
+
+```bash
+# One-time devkit wiring
+DEVKIT=/path/to/nuplan-devkit/nuplan/planning/script/config/simulation/planner
+ln -sf $PWD/diffusion_planner/config/planner/diffusion_planner.yaml          $DEVKIT/
+ln -sf $PWD/diffusion_planner/config/planner/diffusion_planner_guidance.yaml $DEVKIT/
+export NUPLAN_DATA_ROOT=/path/to/nuplan/dataset
+export NUPLAN_MAPS_ROOT=$NUPLAN_DATA_ROOT/maps
+export NUPLAN_DB_FILES=$NUPLAN_DATA_ROOT/nuplan-v1.1/splits/mini
+export NUPLAN_EXP_ROOT=/path/to/nuplan/exp
+export PYTHONPATH=$PYTHONPATH:/path/to/nuplan-devkit:$PWD
+
+CKPT=$RUN_ROOT/grpo_cl8_v6_r3/grpo_epoch_1.pth
+ARGS=$RUN_ROOT/grpo_cl8_v6_r3/args.json
+python /path/to/nuplan-devkit/nuplan/planning/script/run_simulation.py \
+    +simulation=closed_loop_reactive_agents \
+    scenario_builder=nuplan_mini \
+    scenario_filter=one_of_each_scenario_type \
+    scenario_filter.num_scenarios_per_type=5 \
+    planner=diffusion_planner \
+    planner.diffusion_planner.ckpt_path=$CKPT \
+    planner.diffusion_planner.config.args_file=$ARGS \
+    planner.diffusion_planner.enable_ema=false \
+    worker=sequential \
+    experiment_uid=grpo_cl_$(date +%Y%m%d_%H%M%S)
+# PDMS → $NUPLAN_EXP_ROOT/exp/<experiment_uid>/aggregator_metric/*.parquet
+```
+
+### Stage 6 — v7_ent recovery (PDMS 0.244 → 0.305)
+
+`v6_r3` peaks at ep1 then collapses at ep2 (mode-collapse, silent
+safety-metric gradient). Three coupled fixes — retrain the reward
+with PDMS-weighted BCE, add the entropy regulariser, recalibrate CRC
+on policy-generated trajectories — recover and extend the lift.
+
+```bash
+# (1) Reward retrain with PDMS weighting
+python train_reward.py \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --planner_ckpt "$BEST_CKPT" \
+    --save_dir $RUN_ROOT/reward8_v3_pdms \
+    --device cuda --batch_size 8 --num_workers 2 --n_candidates 8 \
+    --epochs 12 --use_shortcut \
+    --use_latent_predictor --latent_layers 2 \
+    --predict_uncertainty --w_uncertainty 0.1 \
+    --use_metric_weights --w_metric_margin 0.5 \
+    --metric_loss_weights ttc=5,ep=5,comfort=2,sl=4 \
+    --adaptive_horizons --dt 0.1
+
+# (2) Policy-mode CRC calibration
+python scripts/calibrate_conformal.py \
+    --planner_ckpt "$BEST_CKPT" \
+    --reward_ckpt  $RUN_ROOT/reward8_v3_pdms/reward_best.pth \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --predict_uncertainty --use_shortcut --score_planner_output \
+    --out_yaml $RUN_ROOT/reward8_v3_pdms/conformal_calibration_policy.yaml
+
+# (3) GRPO with entropy reg + tight KL anchor
+python -u train_grpo.py \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --planner_ckpt "$BEST_CKPT" \
+    --reward_ckpt  "$RUN_ROOT/reward8_v3_pdms/reward_best.pth" \
+    --vocab_path   $RUN_ROOT/vocabulary.pt \
+    --save_dir     $RUN_ROOT/grpo_cl8_v7_ent \
+    --device cuda --batch_size 16 --num_workers 2 --epochs 3 \
+    --w_bc 1.0 --w_kl 0.02 --w_ent 0.05 --use_shortcut \
+    --uncertainty_temp 1.0 --horizon_uncertainty_temp 1.0 --cumulative_uncertainty \
+    --use_metric_weights --use_dynamic_vocab \
+    --drift_aug_K 4 --drift_aug_sigma 0.5
+# Deploy: $RUN_ROOT/grpo_cl8_v7_ent/grpo_epoch_3.pth   (PDMS 0.305)
+```
+
+### Stage 6b — Route-aware reward (PDMS 0.305 → 0.366, the champion)
+
+The v7_ent policy still failed cross-turn scenarios because
+`reward_labeling.py` scored DAC against *any* lane within 6 m,
+including oncoming ones. Two label-time fixes close the hole — the
+model is untouched. Retrain the reward critic, then run **one** GRPO
+epoch from the v7_ent peak.
+
+```bash
+# (1) Reward retrain with route-aware labels (~1 h 20 min)
+python train_reward.py \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --planner_ckpt "$BEST_CKPT" \
+    --save_dir $RUN_ROOT/reward8_v4_fix3c \
+    --device cuda --batch_size 8 --num_workers 2 --n_candidates 8 \
+    --epochs 12 --use_shortcut \
+    --use_latent_predictor --latent_layers 2 \
+    --predict_uncertainty --w_uncertainty 0.1 \
+    --use_metric_weights --w_metric_margin 0.5 \
+    --metric_loss_weights pdms \
+    --adaptive_horizons --dt 0.1
+
+# (2) Single GRPO epoch from the v7_ent peak (~45 min)
+python -u train_grpo.py \
+    --train_set $TRAIN_SET --train_set_list $TRAIN_LIST \
+    --planner_ckpt $RUN_ROOT/grpo_cl8_v7_ent/grpo_epoch_3.pth \
+    --reward_ckpt  $RUN_ROOT/reward8_v4_fix3c/reward_best.pth \
+    --vocab_path   $RUN_ROOT/vocabulary.pt \
+    --save_dir     $RUN_ROOT/grpo_cl8_v7_ent_fix3c \
+    --device cuda --batch_size 16 --num_workers 2 --epochs 1 \
+    --w_bc 1.0 --w_kl 0.02 --w_ent 0.05 --use_shortcut \
+    --uncertainty_temp 1.0 --horizon_uncertainty_temp 1.0 --cumulative_uncertainty \
+    --use_metric_weights --use_dynamic_vocab \
+    --drift_aug_K 4 --drift_aug_sigma 0.5
+# Deploy: $RUN_ROOT/grpo_cl8_v7_ent_fix3c/grpo_epoch_1.pth   (PDMS 0.366, champion)
+```
+
+Sub-metric decomposition (same 47-scn reactive protocol):
+
+| Run | PDMS | DAC | DDC | EP | Progress | TTC | NC |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v7_ent peak | 0.305 | 1.255 | 1.586 | 0.793 | 1.011 | 1.080 | 1.255 |
+| **v8 fix3c** | **0.366** | **1.359** | 1.586 | **0.813** | **1.080** | **1.115** | 1.220 |
+
+The lever is DAC — route-masked labels stop the policy from hugging
+oncoming lanes, which in turn lifts EP, progress and TTC.
+
+**Ceiling check.** Two follow-up GRPO epochs against the same reward
+both regressed (`w_kl 0.05` lost the DAC gain; `w_kl 0.02` traded
+comfort for TTC, net negative). One epoch is the optimum.
+
+![47-scn reactive PDMS — ceiling exploration](assets/img/ceiling_exploration.png)
+
+### Stage 6c — Visual A/B: SFT vs GRPO on the hard turns
+
+Side-by-side closed-loop replays on the three scenarios where GRPO
+and the route-aware reward moved PDMS the most:
+
+| Scenario | SFT (PDMS 0.213) | GRPO (PDMS 0.366) |
+|---|:--:|:--:|
+| `changing_lane_to_left` | ![SFT](assets/gif/changing_lane_to_left_sft.gif) | ![GRPO](assets/gif/changing_lane_to_left_grpo.gif) |
+| `near_multiple_vehicles` | ![SFT](assets/gif/near_multiple_vehicles_sft.gif) | ![GRPO](assets/gif/near_multiple_vehicles_grpo.gif) |
+| `stopping_at_stop_sign_with_lead` | ![SFT](assets/gif/stopping_at_stop_sign_with_lead_sft.gif) | ![GRPO](assets/gif/stopping_at_stop_sign_with_lead_grpo.gif) |
+
+*SFT proposes off-route candidates into oncoming lanes; GRPO stays
+inside the route corridor. Three protected-turn scenarios still
+saturate at DDC = 0.5 — an SFT-vocab bottleneck beyond reach of
+label-side fixes.*
+
+### Stage 7 — ONNX export + INT8 quantisation (optional)
+
+DiT step weight-quantised to INT8 (encoder stays FP32 — its matmuls
+are too small to amortise per-op dispatch). DiT runs **1.88× faster**
+on CPU; encoder is a wash. Numerical parity vs PyTorch: `max|Δ| = 3e-2`
+on the DiT, PDMS contract enforced by closed-loop A/B.
+
+| Submodule | FP32 / INT8 size | FP32 / INT8 lat. | Speedup |
+|---|---|---|---|
+| Encoder (kept FP32) | 7.6 MB | 9.25 ms | — |
+| DiT (single step, INT8) | 17.5 → 5.7 MB | 1.63 → 0.86 ms | **1.88×** |
+
+```bash
+python scripts/export_onnx.py --args-file $ARGS --ckpt $CKPT \
+    --out onnx/encoder_fp32.onnx --target encoder
+python scripts/export_onnx.py --args-file $ARGS --ckpt $CKPT \
+    --out onnx/dit_fp32.onnx --target dit
+python scripts/quantize_onnx.py --in onnx/dit_fp32.onnx \
+    --out onnx/dit_int8.onnx --benchmark
+```
+
+Open-loop eval, ablation matrix, σ-sweep, NavSim 8-camera fusion,
+nuBoard replay, and the BCE-only reward recipe are in
+[`docs/architecture.md`](docs/architecture.md). Tests: `pytest -q`
+(109 tests, 12 suites).
+
+---
+
+## Citation
+
+If you use this fork's reward stack (drift-augmented labelling,
+route-masked DAC, PDMS-weighted dense critic, σ-damped GRPO), please
+cite both the upstream paper and this repository:
+
+```bibtex
+@inproceedings{zheng2025diffusionplanner,
+  title     = {Diffusion-Based Planning for Autonomous Driving with Flexible Guidance},
+  author    = {Zheng, Yinan and Liang, Ruiming and Zheng, Kexin and Zheng, Jinliang
+               and Mao, Liyuan and Li, Jianxiong and Gu, Weihao and Ai, Rui
+               and Li, Shengbo Eben and Zhan, Xianyuan and Liu, Jingjing},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2025},
+  note      = {Oral, Notable-top-2\%},
+  url       = {https://arxiv.org/abs/2501.15564},
+}
+
+@misc{diffusionplanner_grpo_fork,
+  title        = {Diffusion-Planner — Closed-loop RL fine-tune (GRPO + route-masked reward)},
+  author       = {Noopur},
+  year         = {2026},
+  howpublished = {\url{https://github.com/<your-user>/Diffusion-Planner-Re}},
+  note         = {Fork of Zheng et al. 2025; adds drift-augmented labelling,
+                  PDMS-weighted dense reward critic, and route-masked DAC.},
+}
+```

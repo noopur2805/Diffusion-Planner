@@ -1,0 +1,27 @@
+{
+  "baseline": {
+    "adaptive": false,
+    "horizon_unc_temp": 0.0,
+    "cumulative_unc": false
+  },
+  "adaptive": {
+    "adaptive": true,
+    "horizon_unc_temp": 0.0,
+    "cumulative_unc": false
+  },
+  "horizon_unc": {
+    "adaptive": false,
+    "horizon_unc_temp": 1.0,
+    "cumulative_unc": false
+  },
+  "both": {
+    "adaptive": true,
+    "horizon_unc_temp": 1.0,
+    "cumulative_unc": false
+  },
+  "both_cummax": {
+    "adaptive": true,
+    "horizon_unc_temp": 1.0,
+    "cumulative_unc": true
+  }
+}

@@ -1,0 +1,11 @@
+# PyTorch + CUDA 11.8 wheels for the training boxes. Kept separate from
+# pyproject.toml because PEP 621 cannot encode --find-links / index URLs.
+#
+# Install order:
+#   pip install -r requirements/torch-cu118.txt
+#   pip install -e ".[dev]"
+--find-links https://download.pytorch.org/whl/torch_stable.html
+torch==2.0.0+cu118
+torchvision==0.15.1+cu118
+pytorch_lightning==2.0.1
+tensorboard==2.11.2

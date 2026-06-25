@@ -1,0 +1,101 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diffusion_planner"
+version = "1.1.0"
+description = "Closed-loop RL fine-tune of Diffusion-Planner (ICLR 2025) with GRPO + route-masked dense reward critic."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+    { name = "Zheng Yinan, Ruiming Liang, Kexin Zheng @ Tsinghua AIR" },
+]
+maintainers = [
+    { name = "Noopur" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3.9",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = [
+    "autonomous-driving",
+    "diffusion-models",
+    "reinforcement-learning",
+    "grpo",
+    "nuplan",
+    "motion-planning",
+]
+
+# Base runtime deps are managed externally (PyTorch + CUDA wheels live in
+# requirements/torch-cu118.txt because pyproject.toml cannot easily encode
+# --find-links / --index-url). Install order:
+#   pip install -r requirements/torch-cu118.txt
+#   pip install -e .[dev]
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "tqdm",
+    "pyyaml",
+    "timm>=1.0",
+    "mmengine",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "pre-commit",
+]
+dashboard = [
+    "streamlit>=1.30",
+    "Pillow>=10.0",
+]
+onnx = [
+    "onnx>=1.14",
+    "onnxruntime>=1.16",
+    "onnxsim",
+]
+
+[project.urls]
+Homepage = "https://github.com/ZhengYinan-AIR/Diffusion-Planner"
+Paper = "https://arxiv.org/abs/2501.15564"
+Repository = "https://github.com/ZhengYinan-AIR/Diffusion-Planner"
+
+# Console-script entrypoints (`dp-train-sft`, `dp-train-grpo`, …) will be
+# added once the root entrypoint scripts are folded into a
+# `diffusion_planner.cli` subpackage. Until then invoke them directly:
+#   python train_predictor.py ...   # SFT
+#   python train_reward.py    ...   # reward critic
+#   python train_grpo.py      ...   # GRPO fine-tune
+#   python evaluate.py        ...   # open-loop eval
+
+[tool.setuptools.packages.find]
+include = ["diffusion_planner*"]
+exclude = ["tests*", "scripts*", "runs*", "cache*", "assets*", "docs*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+warn_unused_ignores = true

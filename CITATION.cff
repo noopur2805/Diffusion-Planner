@@ -1,0 +1,51 @@
+cff-version: 1.2.0
+message: >
+  If you use this software, please cite both the upstream paper
+  (Zheng et al., ICLR 2025) and this fork.
+title: "Diffusion-Planner — Closed-loop RL fine-tune (GRPO + route-masked reward)"
+type: software
+version: 1.1.0
+date-released: 2026-06-25
+authors:
+  - family-names: "Noopur"
+    affiliation: "Independent"
+repository-code: "https://github.com/<your-user>/Diffusion-Planner-Re"
+license: MIT
+keywords:
+  - autonomous-driving
+  - diffusion-models
+  - reinforcement-learning
+  - grpo
+  - nuplan
+  - motion-planning
+references:
+  - type: conference-paper
+    title: "Diffusion-Based Planning for Autonomous Driving with Flexible Guidance"
+    authors:
+      - family-names: "Zheng"
+        given-names: "Yinan"
+      - family-names: "Liang"
+        given-names: "Ruiming"
+      - family-names: "Zheng"
+        given-names: "Kexin"
+      - family-names: "Zheng"
+        given-names: "Jinliang"
+      - family-names: "Mao"
+        given-names: "Liyuan"
+      - family-names: "Li"
+        given-names: "Jianxiong"
+      - family-names: "Gu"
+        given-names: "Weihao"
+      - family-names: "Ai"
+        given-names: "Rui"
+      - family-names: "Li"
+        given-names: "Shengbo Eben"
+      - family-names: "Zhan"
+        given-names: "Xianyuan"
+      - family-names: "Liu"
+        given-names: "Jingjing"
+    year: 2025
+    conference:
+      name: "International Conference on Learning Representations (ICLR)"
+    notes: "Oral, Notable-top-2%"
+    url: "https://arxiv.org/abs/2501.15564"
