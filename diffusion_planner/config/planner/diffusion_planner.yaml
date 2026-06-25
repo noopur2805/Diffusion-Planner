@@ -1,0 +1,72 @@
+diffusion_planner:
+  _target_: diffusion_planner.planner.planner.DiffusionPlanner
+  _convert_: "all"
+
+  config:
+    _target_: diffusion_planner.utils.config.Config
+    _convert_: "all"
+
+    args_file: ???
+
+    guidance_fn: null
+  ckpt_path: ???
+
+  enable_ema: true
+
+  past_trajectory_sampling:
+    _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+    _convert_: "all"
+
+    num_poses: 20
+    time_horizon: 2
+
+  future_trajectory_sampling:
+    _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+    _convert_: "all"
+
+    num_poses: 80
+    time_horizon: 8
+
+  device: cuda
+
+  # Novelty 8 -- momentum-aware inference (MomAD TTM + Ouroboros warm-start).
+  # Defaults reproduce upstream behaviour bit-identically.
+  use_ttm: false
+  warm_start_alpha: 0.0
+  n_samples: 1
+
+  # Conformal Risk Control safety tier (opt-in). When ``use_conformal_safety``
+  # is false the gate is skipped and the planner behaviour matches upstream.
+  # ``tau_safe=0.0`` runs in monitor-only mode (the CRC lower bound is logged
+  # every 100 steps but the gate never swaps in the fallback, since
+  # ``lb_pdms`` is clamped to >= 0).
+  use_conformal_safety: false
+  reward_ckpt: null
+  conformal_calibration_path: null
+  tau_safe: 0.0
+  fallback_decel: 0.0
+
+  # Phase 2 -- ONNX Runtime backends (opt-in). When ``use_onnx`` is false the
+  # planner runs the original PyTorch graph and the path overrides are ignored.
+  use_onnx: false
+  onnx_encoder_path: null
+  onnx_dit_path: null
+
+  # Route-DAC veto (Fix #2): drop candidates that leave the route corridor
+  # before Hausdorff/TTM rerank. Only effective when ``n_samples`` > 1.
+  # ``route_dac_threshold_m`` is the per-timestep distance to the nearest
+  # route-lane sample considered "on route"; ``route_dac_min_frac`` is the
+  # minimum fraction of horizon steps that must satisfy it.
+  use_route_dac_veto: false
+  route_dac_threshold_m: 2.5
+  route_dac_min_frac: 0.75
+
+  # Route heading veto (Fix #3a): drop wrong-way candidates whose local
+  # heading disagrees with the nearest route-lane tangent. Combined with the
+  # distance veto via logical AND; either flag may be enabled independently.
+  # ``route_heading_dist_m`` bounds the distance at which a route segment is
+  # close enough for its tangent to be informative.
+  use_route_heading_veto: false
+  route_heading_tol_deg: 60.0
+  route_heading_min_frac: 0.75
+  route_heading_dist_m: 5.0
