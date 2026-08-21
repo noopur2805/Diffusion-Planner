@@ -398,14 +398,33 @@ Build/verify:
 python scripts/build_tensorrt_engines.py --model all --precision all
 ```
 
-Status: engines build and run correctly (verified with synthetic tensors
-matching each I/O tensor's shape/dtype); the planner wiring
+Status: FP32 engines are verified end-to-end on real nuPlan-mini
+scenarios (`scripts/compare_pytorch_trt.py`), loading the same checkpoint
+into a PyTorch baseline and a TensorRT-wired planner
 (`use_tensorrt`/`trt_encoder_path`/`trt_dit_path` in
-`diffusion_planner/config/planner/diffusion_planner.yaml`) is in place
-but not yet exercised end-to-end on real nuPlan-mini scenarios.
-**Not yet done:** INT8 TensorRT calibration, PyTorch/ORT/TensorRT
-latency-throughput benchmark, and closed-loop PDMS parity check —
-no numbers are claimed for any of these until measured.
+`diffusion_planner/config/planner/diffusion_planner.yaml`) and comparing
+predicted trajectories batch-by-batch:
+
+| Metric | Value |
+|---|---|
+| Max abs diff (trajectory, meters) | 0.034 |
+| RMSE (trajectory, meters) | 0.0033 |
+
+Latency/throughput benchmark (`scripts/benchmark_latency.py`, batch=1,
+single RTX 5060 Laptop GPU, 10 warmup + 50 timed full forward passes):
+
+| Backend | Mean latency | p50 | p95 | Throughput |
+|---|---|---|---|---|
+| PyTorch (FP32, eager) | 6.27 ms | 6.06 ms | 7.11 ms | 159.6 samples/s |
+| TensorRT (FP32) | 1.95 ms | 1.92 ms | 2.04 ms | 513.4 samples/s |
+
+**Speedup: 3.22x** mean-latency reduction at matching accuracy (no
+precision loss — both paths are FP32).
+
+**Not yet done:** FP16 engines build but are not yet numerically verified
+or benchmarked (blocked on an `onnx`/`nvidia-modelopt` dependency
+conflict for re-export), INT8 TensorRT calibration, and closed-loop PDMS
+parity check — no numbers are claimed for any of these until measured.
 
 Open-loop eval, ablation matrix, σ-sweep, NavSim 8-camera fusion,
 nuBoard replay, and the BCE-only reward recipe are in
