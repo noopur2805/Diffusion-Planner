@@ -27,8 +27,8 @@ without touching the architecture?*
 47-scenario nuPlan-mini filter. *(nuPlan-mini is
 a tighter slice than upstream's Test14/Val14 splits — this is a
 fork-internal SFT-vs-GRPO ablation, not a leaderboard claim.)* Full
-narrative, ablations, ONNX/INT8 export, and per-novelty attribution live
-in [`docs/architecture.md`](docs/architecture.md).
+narrative, ablations, ONNX/INT8 export, TensorRT engine build, and
+per-novelty attribution live in [`docs/architecture.md`](docs/architecture.md).
 
 ## Table of contents
 
@@ -373,6 +373,39 @@ python scripts/export_onnx.py --args-file $ARGS --ckpt $CKPT \
 python scripts/quantize_onnx.py --in onnx/dit_fp32.onnx \
     --out onnx/dit_int8.onnx --benchmark
 ```
+
+### Stage 8 — TensorRT 11.x engine build (in progress)
+
+Encoder and DiT ONNX graphs (Stage 7) are compiled into TensorRT engines
+at FP32 and FP16, and a CUDA-native runtime adapter
+(`diffusion_planner/inference/trt_runtime.py`) is wired into the planner
+via `use_tensorrt=true`, mirroring the existing ONNX Runtime path
+(`use_onnx`). TensorRT 11.x builds strongly-typed networks (no
+`BuilderFlag.FP16`); FP16 precision comes from a pre-cast ONNX graph
+(`onnxconverter-common`, `keep_io_types=False`), with a manual patch for
+`Cast` nodes the converter mislabels.
+
+| Engine | Precision | Build time | Size |
+|---|---|---|---|
+| Encoder | FP32 | 13.2 s | 10.5 MB |
+| Encoder | FP16 | 39.0 s | 10.5 MB |
+| DiT | FP32 | 7.6 s | 18.3 MB |
+| DiT | FP16 | 44.8 s | 11.1 MB |
+
+Build/verify:
+
+```bash
+python scripts/build_tensorrt_engines.py --model all --precision all
+```
+
+Status: engines build and run correctly (verified with synthetic tensors
+matching each I/O tensor's shape/dtype); the planner wiring
+(`use_tensorrt`/`trt_encoder_path`/`trt_dit_path` in
+`diffusion_planner/config/planner/diffusion_planner.yaml`) is in place
+but not yet exercised end-to-end on real nuPlan-mini scenarios.
+**Not yet done:** INT8 TensorRT calibration, PyTorch/ORT/TensorRT
+latency-throughput benchmark, and closed-loop PDMS parity check —
+no numbers are claimed for any of these until measured.
 
 Open-loop eval, ablation matrix, σ-sweep, NavSim 8-camera fusion,
 nuBoard replay, and the BCE-only reward recipe are in

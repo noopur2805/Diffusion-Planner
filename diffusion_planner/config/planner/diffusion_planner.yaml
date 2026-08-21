@@ -52,6 +52,13 @@ diffusion_planner:
   onnx_encoder_path: null
   onnx_dit_path: null
 
+  # Phase 3 -- TensorRT backends (opt-in). Mutually exclusive with use_onnx.
+  # When ``use_tensorrt`` is false the planner runs the original PyTorch graph
+  # and the path overrides are ignored.
+  use_tensorrt: false
+  trt_encoder_path: null
+  trt_dit_path: null
+
   # Route-DAC veto (Fix #2): drop candidates that leave the route corridor
   # before Hausdorff/TTM rerank. Only effective when ``n_samples`` > 1.
   # ``route_dac_threshold_m`` is the per-timestep distance to the nearest

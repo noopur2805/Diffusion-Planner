@@ -65,6 +65,11 @@ class DiffusionPlanner(AbstractPlanner):
             use_onnx: bool = False,
             onnx_encoder_path: str = None,
             onnx_dit_path: str = None,
+            # Phase 3 -- TensorRT backends (opt-in; PyTorch by default).
+            # Mutually exclusive with use_onnx -- both swap the same submodules.
+            use_tensorrt: bool = False,
+            trt_encoder_path: str = None,
+            trt_dit_path: str = None,
             # Route-DAC veto (Fix #2): drop off-route candidates before TTM rerank.
             use_route_dac_veto: bool = False,
             route_dac_threshold_m: float = 2.5,
@@ -129,6 +134,14 @@ class DiffusionPlanner(AbstractPlanner):
         self._use_onnx = bool(use_onnx)
         self._onnx_encoder_path = onnx_encoder_path
         self._onnx_dit_path = onnx_dit_path
+
+        # Phase 3 -- TensorRT backends. Same resolution timing as ONNX above.
+        self._use_tensorrt = bool(use_tensorrt)
+        self._trt_encoder_path = trt_encoder_path
+        self._trt_dit_path = trt_dit_path
+        assert not (self._use_onnx and self._use_tensorrt), (
+            "use_onnx and use_tensorrt are mutually exclusive"
+        )
 
         # Route-DAC veto state.
         self._use_route_dac_veto = bool(use_route_dac_veto)
@@ -204,6 +217,18 @@ class DiffusionPlanner(AbstractPlanner):
                 device=self._device,
             )
             print(f"[diffusion_planner] ONNX runtime on: {wired}", flush=True)
+
+        # Phase 3 -- swap PyTorch submodules for TensorRT-backed adapters.
+        # Same post-load_state_dict timing as the ONNX path above.
+        if self._use_tensorrt and (self._trt_encoder_path or self._trt_dit_path):
+            from diffusion_planner.inference import wire_trt_into_planner
+            wired = wire_trt_into_planner(
+                self._planner,
+                encoder_engine=self._trt_encoder_path,
+                dit_engine=self._trt_dit_path,
+                device=self._device,
+            )
+            print(f"[diffusion_planner] TensorRT runtime on: {wired}", flush=True)
 
         self._initialization = initialization
 
